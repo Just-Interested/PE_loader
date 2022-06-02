@@ -1,7 +1,15 @@
 #include <stdio.h>
 #include <windows.h>
 
+#define QWORD unsigned long long int
 
+/*
+Check the app is x64 or x86 arch
+@param LPVOID buffer - buffer, that contains raw PE data
+ret 1 - x64
+ret 0 - x86
+ret -1 - PE has wrong signature
+*/
 int check_PE_64(LPVOID buffer){
     PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)buffer;
     if (dos_header->e_magic != 0x5A4D){
@@ -18,6 +26,22 @@ int check_PE_64(LPVOID buffer){
     return 0;
 }
 
+DWORD rva_to_raw_offset(DWORD rva, LPVOID pe_file_buffer){
+    printf("RVA = 0x%x\n", rva);
+    PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)pe_file_buffer;
+    PIMAGE_NT_HEADERS nt_header = (PIMAGE_NT_HEADERS)(dos_header->e_lfanew + pe_file_buffer);
+    PIMAGE_SECTION_HEADER section_header = IMAGE_FIRST_SECTION(nt_header);
+    int i = 0;
+    for (int i = 0; i < nt_header->FileHeader.NumberOfSections; i++)
+    {   
+        printf("section rva: 0x%x   section top border: 0x%x\n", section_header->VirtualAddress, section_header->VirtualAddress + section_header->SizeOfRawData);
+        if (rva >= section_header->VirtualAddress && rva < (section_header->VirtualAddress + section_header->SizeOfRawData))
+            return (rva - section_header->VirtualAddress + section_header->PointerToRawData);
+        section_header++;
+    }
+    return 0;
+}
+
 /*
 Load PE32+ file
 @param LPVOID buffer - buffer, that contains raw PE data
@@ -26,7 +50,7 @@ int load_x64(LPVOID buffer){
     printf("Loading x64...\n");
     NTSTATUS status = 0;
     PIMAGE_DOS_HEADER dos_header = (PIMAGE_DOS_HEADER)buffer;
-    PIMAGE_NT_HEADERS64 nt_header = (PIMAGE_NT_HEADERS64)(dos_header->e_lfanew + buffer);
+    PIMAGE_NT_HEADERS nt_header = (PIMAGE_NT_HEADERS)(dos_header->e_lfanew + buffer);
     LPVOID image_base = (LPVOID)nt_header->OptionalHeader.ImageBase;
     DWORD size_of_image = nt_header->OptionalHeader.SizeOfImage;
     LPVOID lpvResult = VirtualAlloc(image_base, size_of_image, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
@@ -48,21 +72,21 @@ int load_x64(LPVOID buffer){
 
     // place sections to there addresses
     WORD size_of_opt_header = nt_header->FileHeader.SizeOfOptionalHeader;
-    PIMAGE_SECTION_HEADER section_header = (PIMAGE_SECTION_HEADER)(
-                                            image_base + 
-                                            size_of_opt_header + sizeof(IMAGE_FILE_HEADER) +  
-                                            dos_header->e_lfanew + 4
-                                            ); // add 4, because of PE signature
-    while (*(long long*)section_header != 0){
-        //printf("Section name: %s\n", section_header->Name);
+    PIMAGE_SECTION_HEADER section_header = IMAGE_FIRST_SECTION(nt_header);
+    int i = 0;
+    for (int i = 0; i < nt_header->FileHeader.NumberOfSections; i++)
+    {
+        printf("Section name: %s\n", section_header->Name);
         DWORD raw_size = section_header->SizeOfRawData;
         DWORD raw_offset = section_header->PointerToRawData;
         DWORD section_rva = section_header->VirtualAddress;
         //printf("Copying %d bytes from raw offset 0x%x to virtual address %x\n", raw_size, raw_offset, section_rva);
         memcpy((LPVOID)((LPBYTE)image_base + section_rva), (LPVOID)((LPBYTE)buffer + raw_offset), raw_size);
-        section_header = (PIMAGE_SECTION_HEADER)((LPBYTE)section_header + sizeof(IMAGE_SECTION_HEADER));
+        section_header++;
     }
-
+    DWORD import_dir_rva = nt_header->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    printf("Raw offset: 0x%x\n", rva_to_raw_offset(import_dir_rva, buffer));
+    
     status = VirtualFree(lpvResult, 0, MEM_RELEASE);
     if (status == 0){
         printf("Failed to free memory.\nLast error: 0x%08x", GetLastError());
